@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="ar">
+<head>
+    <meta charset="UTF-8">
+    <title>تطبيق مسح المستندات</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+        }
+
+        #videoElement, #canvasOutput {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        #captureButton {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: #fff;
+            border: none;
+            border-radius: 50%;
+            width: 80px;
+            height: 80px;
+            cursor: pointer;
+            outline: none;
+        }
+
+        #saveButton {
+            position: fixed;
+            bottom: 120px;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: #4CAF50;
+            color: #fff;
+            border: none;
+            border-radius: 5px;
+            padding: 15px 30px;
+            font-size: 16px;
+            cursor: pointer;
+            outline: none;
+            display: none;
+        }
+
+    </style>
+</head>
+<body>
+
+    <video id="videoElement" autoplay playsinline></video>
+    <canvas id="canvasOutput"></canvas>
+    <button id="captureButton"></button>
+    <button id="saveButton">حفظ الصورة</button>
+
+    <!-- إضافة مكتبة OpenCV.js -->
+    <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady();"></script>
+
+    <script>
+        let video = document.getElementById('videoElement');
+        let canvas = document.getElementById('canvasOutput');
+        let captureButton = document.getElementById('captureButton');
+        let saveButton = document.getElementById('saveButton');
+        let streaming = false;
+        let capturedImage = null;
+
+        function startCamera() {
+            navigator.mediaDevices.getUserMedia({
+                video: {
+                    facingMode: 'environment'
+                },
+                audio: false
+            })
+            .then(function(stream) {
+                video.srcObject = stream;
+                video.play();
+            })
+            .catch(function(err) {
+                console.log("خطأ في الوصول إلى الكاميرا: " + err);
+            });
+        }
+
+        function onOpenCvReady() {
+            if (cv.getBuildInformation) {
+                console.log(cv.getBuildInformation());
+                startCamera();
+            } else {
+                console.log('لم يتم تحميل OpenCV.js بشكل صحيح.');
+            }
+        }
+
+        video.addEventListener('canplay', function(ev){
+            if (!streaming) {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                streaming = true;
+            }
+        }, false);
+
+        captureButton.addEventListener('click', function(ev){
+            // التقاط الإطار الحالي ومعالجته
+            let context = canvas.getContext('2d');
+            if (video.videoWidth && video.videoHeight) {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+                // تحويل الصورة إلى مصفوفة OpenCV
+                let src = cv.imread(canvas);
+                let dst = new cv.Mat();
+
+                // تحويل الصورة إلى تدرج الرمادي
+                cv.cvtColor(src, dst, cv.COLOR_RGBA2GRAY, 0);
+
+                // تطبيق Gaussian Blur لتقليل الضوضاء
+                cv.GaussianBlur(dst, dst, new cv.Size(5, 5), 0);
+
+                // تطبيق Canny Edge Detection للكشف عن الحواف
+                cv.Canny(dst, dst, 75, 200);
+
+                // العثور على الخطوط الخارجية (contours)
+                let contours = new cv.MatVector();
+                let hierarchy = new cv.Mat();
+                cv.findContours(dst, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+
+                // البحث عن أكبر مربع يشبه المستند
+                let maxArea = 0;
+                let maxContour = null;
+                for (let i = 0; i < contours.size(); i++) {
+                    let cnt = contours.get(i);
+                    let peri = cv.arcLength(cnt, true);
+                    let approx = new cv.Mat();
+                    cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
+                    if (approx.rows == 4) {
+                        let area = cv.contourArea(cnt);
+                        if (area > maxArea) {
+                            maxArea = area;
+                            maxContour = approx;
+                        }
+                    }
+                    cnt.delete();
+                    approx.delete();
+                }
+
+                if (maxContour != null) {
+                    // الحصول على نقاط المستند وترتيبها
+                    let points = [];
+                    for (let i = 0; i < 4; i++) {
+                        points.push({
+                            x: maxContour.data32S[i * 2],
+                            y: maxContour.data32S[i * 2 + 1]
+                        });
+                    }
+
+                    // ترتيب النقاط (علوي يسار، علوي يمين، سفلي يمين، سفلي يسار)
+                    points.sort((a, b) => a.y - b.y);
+                    let topPoints = points.slice(0, 2).sort((a, b) => a.x - b.x);
+                    let bottomPoints = points.slice(2, 4).sort((a, b) => a.x - b.x);
+                    let orderedPoints = [topPoints[0], topPoints[1], bottomPoints[1], bottomPoints[0]];
+
+                    // تحديد مصفوفة التحويل
+                    let srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
+                        orderedPoints[0].x, orderedPoints[0].y,
+                        orderedPoints[1].x, orderedPoints[1].y,
+                        orderedPoints[2].x, orderedPoints[2].y,
+                        orderedPoints[3].x, orderedPoints[3].y
+                    ]);
+
+                    // حساب العرض والارتفاع الجديدين
+                    let widthA = Math.hypot(orderedPoints[2].x - orderedPoints[3].x, orderedPoints[2].y - orderedPoints[3].y);
+                    let widthB = Math.hypot(orderedPoints[1].x - orderedPoints[0].x, orderedPoints[1].y - orderedPoints[0].y);
+                    let maxWidth = Math.max(widthA, widthB);
+
+                    let heightA = Math.hypot(orderedPoints[1].x - orderedPoints[2].x, orderedPoints[1].y - orderedPoints[2].y);
+                    let heightB = Math.hypot(orderedPoints[0].x - orderedPoints[3].x, orderedPoints[0].y - orderedPoints[3].y);
+                    let maxHeight = Math.max(heightA, heightB);
+
+                    let dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
+                        0, 0,
+                        maxWidth - 1, 0,
+                        maxWidth - 1, maxHeight - 1,
+                        0, maxHeight - 1
+                    ]);
+
+                    // تطبيق التحويل المنظوري (Perspective Transform)
+                    let M = cv.getPerspectiveTransform(srcTri, dstTri);
+                    let warped = new cv.Mat();
+                    cv.warpPerspective(src, warped, M, new cv.Size(maxWidth, maxHeight));
+
+                    // عرض الصورة المعالجة
+                    cv.imshow('canvasOutput', warped);
+                    capturedImage = canvas.toDataURL('image/png');
+
+                    // تنظيف
+                    srcTri.delete(); dstTri.delete(); M.delete(); warped.delete();
+                } else {
+                    alert('لم يتم العثور على مستند. يرجى المحاولة مرة أخرى.');
+                }
+
+                // تنظيف
+                src.delete(); dst.delete(); contours.delete(); hierarchy.delete();
+
+                // إظهار زر الحفظ
+                saveButton.style.display = 'block';
+            }
+            ev.preventDefault();
+        }, false);
+
+        saveButton.addEventListener('click', function(){
+            if (capturedImage) {
+                let link = document.createElement('a');
+                link.href = capturedImage;
+                link.download = 'captured_document.png';
+                link.click();
+            }
+        }, false);
+    </script>
+
+</body>
+</html>
